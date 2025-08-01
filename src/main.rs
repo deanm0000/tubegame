@@ -3,12 +3,11 @@ use rand::prelude::SliceRandom;
 use rand::rng;
 use rayon::prelude::*;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::thread::sleep;
 use std::time::Duration;
 use std::{fmt, thread};
 const CAPACITY: usize = 4;
@@ -112,7 +111,7 @@ impl Container {
     }
 
     fn all_one_color(&self) -> bool {
-        if &self.items.len() == &0usize {
+        if self.items.len() == 0usize {
             return false;
         }
         let first_color = self.items.first().expect("checked len, why?");
@@ -335,11 +334,8 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
                                 // let mut parent_vec: Vec<Game> = Vec::with_capacity(1);
                                 let parent = {
                                     let lock = nodes_clone.lock().unwrap();
-                                    let parent = lock.get(&init_parent).clone();
-                                    match parent {
-                                        Some(parent) => Some(parent.clone()),
-                                        None => None,
-                                    }
+                                    let parent = lock.get(&init_parent);
+                                    parent.map(|parent| parent.clone())
                                 };
                                 match parent {
                                     Some(parent) => {
@@ -351,7 +347,7 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
                                         match res {
                                             Ok(_) => {}
                                             Err(e) => {
-                                                eprintln!("{}", e);
+                                                eprintln!("{e}");
                                             }
                                         }
                                         break;
@@ -382,7 +378,7 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
                 }
             }
         }
-        while handles.len() > 0 {
+        while !handles.is_empty() {
             let mut dones: Vec<usize> = vec![];
             for (i, handle) in handles.iter().enumerate() {
                 if handle.is_finished() {
@@ -391,7 +387,7 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
                 }
             }
             // if any handles are to be removed then break out of this while
-            let break_early = dones.len() > 0;
+            let break_early = !dones.is_empty();
             for done in dones.into_iter().rev() {
                 handles.remove(done);
             }
@@ -400,7 +396,7 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
             }
             thread::sleep(Duration::from_millis(500));
         }
-        if { game_move_queue_clone.lock().unwrap().len() } == 0 && handles.len() == 0 {
+        if { game_move_queue_clone.lock().unwrap().len() } == 0 && handles.is_empty() {
             return None;
         }
     }
@@ -433,7 +429,7 @@ fn main() {
                 continue;
             }
             Some(sol) => {
-                println!("is solvable {:?}", sol);
+                println!("is solvable {sol:?}");
             }
         };
         loop {
