@@ -451,7 +451,7 @@ fn main() {
                     match num_colors {
                         Ok(n) => match n {
                             2..13 => {
-                                palette = COLORS[0..n - 1].to_vec();
+                                palette = COLORS[0..n].to_vec();
                                 break;
                             }
                             _ => {
