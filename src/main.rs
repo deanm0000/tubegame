@@ -1,14 +1,13 @@
-use chrono::Local;
 use rand::prelude::SliceRandom;
 use rand::rng;
-use rayon::prelude::*;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::io::{self, Write};
+use std::num::{ParseFloatError, ParseIntError};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, thread};
 const CAPACITY: usize = 4;
 
@@ -238,8 +237,6 @@ impl Game {
     }
 }
 
-/// Build a level with `k` colors (+ exactly 4 of each) and
-/// `empty` empty tubes; then scramble it by `scramble_moves`.
 fn generate_level(palette: &[Color], empty: usize) -> Game {
     // Start from solved
     let mut all_colors: Vec<Color> = Vec::with_capacity(palette.len() * CAPACITY);
@@ -271,39 +268,59 @@ fn generate_level(palette: &[Color], empty: usize) -> Game {
 }
 
 #[derive(Debug, Clone)]
-enum FromNode {
-    FromPrevNode(FromPrevNode),
-    FromInitial,
-}
-#[derive(Debug, Clone)]
 struct FromPrevNode {
     parent: Game,
     mv: Move,
 }
-struct GameTree {
-    init: Game,
+fn init_fixed() -> Game {
+    let mut tubes: Vec<Container> = (0..14).map(|_| Container::new()).collect();
+    tubes[0].items = vec![Color::Yellow, Color::Red, Color::Red, Color::Red];
+    tubes[1].items = vec![
+        Color::DarkBlue,
+        Color::Yellow,
+        Color::LightGreen,
+        Color::LightGreen,
+    ];
+    tubes[2].items = vec![Color::Violet, Color::Pink, Color::Pink, Color::Pink];
+    tubes[3].items = vec![Color::Green, Color::Orange, Color::Magenta, Color::Yellow];
+    tubes[4].items = vec![
+        Color::Brown,
+        Color::LightGreen,
+        Color::LightGreen,
+        Color::DarkBlue,
+    ];
+    tubes[5].items = vec![Color::Yellow, Color::Red, Color::Magenta, Color::Brown];
+    tubes[6].items = vec![Color::Blue, Color::Green, Color::Green, Color::Green];
+    tubes[7].items = vec![Color::DarkBlue, Color::Violet, Color::Violet, Color::Violet];
+    tubes[8].items = vec![Color::Brown, Color::Orange, Color::Orange, Color::Orange];
+    tubes[9].items = vec![Color::Cyan, Color::DarkBlue, Color::Magenta, Color::Magenta];
+    tubes[10].items = vec![Color::DarkBlue, Color::Pink, Color::Blue, Color::Blue];
+    tubes[11].items = vec![Color::Brown, Color::Cyan, Color::Cyan, Color::Cyan];
+    tubes[12].items = vec![];
+    tubes[13].items = vec![];
+    Game { tubes }
 }
 
-fn solve_par(initial: &Game) -> Option<Vec<Move>> {
-    let now = Local::now().format("%H:%M:%S");
-    println!("{now}: started solve_par");
-    let n_threads = 16;
+enum SolveRes {
+    Timeout,
+    NoSolution,
+    Found(Vec<Move>),
+}
+fn solve_par(initial: &Game, max_sec_wait: u64) -> SolveRes {
+    let n_threads = 50;
     let nodes: Arc<Mutex<HashMap<Game, FromPrevNode>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(n_threads);
     let game_move_queue: Arc<Mutex<Vec<(Game, Option<Move>)>>> =
         Arc::new(Mutex::new(vec![(initial.clone(), None)]));
     let (tx, rx) = mpsc::channel::<Vec<Move>>();
-    loop {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(max_sec_wait);
+    while start.elapsed() < timeout {
         if let Ok(done) = rx.try_recv() {
             handles.clear();
             let done = done.into_iter().rev().collect();
-            return Some(done);
+            return SolveRes::Found(done);
         }
-        let node_clone = Arc::clone(&nodes);
-        let node_len = { node_clone.lock().unwrap().len() };
-        let now = Local::now().format("%H:%M:%S");
-        println!("{now}: checked {node_len} games");
-
         let game_move_queue_clone = Arc::clone(&game_move_queue);
         while handles.len() < n_threads && { game_move_queue_clone.lock().unwrap().len() } > 0 {
             let game_move_queue_clone = Arc::clone(&game_move_queue);
@@ -343,13 +360,8 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
                                         path.push(parent.mv);
                                     }
                                     None => {
-                                        let res = tx_clone.send(path);
-                                        match res {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                eprintln!("{e}");
-                                            }
-                                        }
+                                        let _ = tx_clone.send(path);
+
                                         break;
                                     }
                                 }
@@ -394,44 +406,121 @@ fn solve_par(initial: &Game) -> Option<Vec<Move>> {
             if break_early {
                 break;
             }
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(50));
         }
         if { game_move_queue_clone.lock().unwrap().len() } == 0 && handles.is_empty() {
-            return None;
+            return SolveRes::NoSolution;
         }
     }
+    return SolveRes::Timeout;
 }
 fn main() {
     println!("Welcome to Water Sort Puzzle!");
     loop {
-        print!("How many colors ");
-        io::stdout().flush().unwrap();
-        let mut entry = String::new();
-        io::stdin().read_line(&mut entry).unwrap();
-        let num_colors: usize = entry.trim().parse().unwrap();
-        let palette = match num_colors {
-            2..13 => COLORS[0..num_colors - 1].to_vec(),
-            _ => panic!("can't choose that"),
-        };
-        print!("How many empties ");
-        io::stdout().flush().unwrap();
-        let mut entry = String::new();
-        io::stdin().read_line(&mut entry).unwrap();
-        let empties: usize = entry.trim().parse().unwrap();
-
-        let mut game = generate_level(&palette, empties);
-
-        // check if solvable
-        let solution = solve_par(&game);
-        match solution {
-            None => {
-                print!("no solution");
-                continue;
+        let mut use_fixed = true;
+        //use fixed or random game
+        loop {
+            print!("Use (f)ixed or (r)andom ");
+            io::stdout().flush().unwrap();
+            let mut entry = String::new();
+            io::stdin().read_line(&mut entry).unwrap();
+            let fr = entry.trim();
+            match fr {
+                "f" => {
+                    break;
+                }
+                "r" => {
+                    use_fixed = false;
+                    break;
+                }
+                _ => {
+                    println!("{fr} is invalid selection");
+                }
             }
-            Some(sol) => {
-                println!("is solvable {sol:?}");
+        }
+        let mut game = match use_fixed {
+            true => init_fixed(),
+            false => {
+                let palette: Vec<Color>;
+                loop {
+                    print!("How many colors ");
+                    io::stdout().flush().unwrap();
+                    let mut entry = String::new();
+                    io::stdin().read_line(&mut entry).unwrap();
+                    let num_colors: Result<usize, ParseIntError> = entry.trim().parse();
+                    match num_colors {
+                        Ok(n) => match n {
+                            2..13 => {
+                                palette = COLORS[0..n - 1].to_vec();
+                                break;
+                            }
+                            _ => {
+                                println!("can't do {n}");
+                            }
+                        },
+                        Err(_) => {
+                            println!("don't understand {entry}");
+                        }
+                    }
+                }
+                let empties;
+                loop {
+                    print!("How many empties ");
+                    io::stdout().flush().unwrap();
+                    let mut entry = String::new();
+                    io::stdin().read_line(&mut entry).unwrap();
+                    let res: Result<usize, ParseIntError> = entry.trim().parse();
+                    match res {
+                        Ok(n) => {
+                            empties = n;
+                            break;
+                        }
+                        Err(_) => {
+                            println!("don't understand {entry}");
+                        }
+                    }
+                }
+                generate_level(&palette, empties)
             }
         };
+
+        // pre-solve time
+
+        let max_wait: u64;
+        loop {
+            print!("How many seconds to attempt presolve (0 means don't presolve) ");
+            io::stdout().flush().unwrap();
+            let mut entry = String::new();
+            io::stdin().read_line(&mut entry).unwrap();
+            let res: Result<f64, ParseFloatError> = entry.trim().parse();
+            match res {
+                Ok(n) => {
+                    max_wait = n as u64;
+                    break;
+                }
+                Err(_) => {
+                    println!("don't understand {entry}");
+                }
+            }
+        }
+        match max_wait {
+            0 => {}
+            _ => {
+                let solution = solve_par(&game, max_wait);
+                match solution {
+                    SolveRes::NoSolution => {
+                        println!("no solution found");
+                    }
+                    SolveRes::Timeout => {
+                        println!("solution couldn't be found in time");
+                    }
+                    SolveRes::Found(sol) => {
+                        println!("is solvable {sol:?}");
+                    }
+                };
+            }
+        }
+
         loop {
             game.display();
             if game.is_solved() {
